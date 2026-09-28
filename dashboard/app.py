@@ -27,6 +27,8 @@ from streamlit_folium import st_folium
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 import config  # noqa: E402
+import live_rain  # noqa: E402
+import live_predict  # noqa: E402
 
 st.set_page_config(page_title="Assam Flood DSS", layout="wide")
 
@@ -118,6 +120,111 @@ def build_map(predictions, allocation, centroids, bases) -> folium.Map:
     return fmap
 
 
+def circle_lookup(predictions, summary):
+    """Pick a Revenue Circle -> see its predicted severity, rank, reasons and relief needs."""
+    st.subheader("Check a Revenue Circle")
+    st.caption("Select or type a Revenue Circle ID to see its predicted flood severity for the coming month.")
+    ids = sorted(predictions[config.ID_COLUMN].astype(str).tolist())
+    default = predictions.sort_values("priority_rank")[config.ID_COLUMN].iloc[0]
+    chosen = st.selectbox("Revenue Circle ID", ids, index=ids.index(str(default)))
+    row = predictions[predictions[config.ID_COLUMN].astype(str) == chosen].iloc[0]
+
+    cat = row["impact_category"]
+    icon = {"High": "🔴", "Medium": "🟠", "Low": "🟢"}.get(cat, "⚪")
+    a, b, c = st.columns(3)
+    a.metric("Predicted severity", f"{icon} {cat}")
+    b.metric("Flood-impact probability", f"{row['predicted_probability'] * 100:.1f}%")
+    b.caption("Cut-offs: Low < 33%, Medium 33-66%, High >= 66%")
+    c.metric("Priority rank", f"{int(row['priority_rank'])} of {len(predictions)}")
+
+    if cat == "Low":
+        st.success("Low predicted impact next month. No relief resources are being allocated to this circle.")
+    else:
+        d, e, f, g = st.columns(4)
+        d.metric("Est. people affected", f"{row['predicted_affected_population']:,.0f}")
+        e.metric("Boats needed", int(row["boats_needed"]))
+        f.metric("Food units needed", int(row["food_units_needed"]))
+        g.metric("Medical teams needed", int(row["medical_teams_needed"]))
+        st.caption("Resource needs use a simple assumed conversion from probability to affected people (see config.py).")
+
+    st.markdown("**Why this rating (top drivers, from SHAP):**")
+    for reason in str(row["top_reasons"]).split(";"):
+        st.write("- " + reason.strip())
+
+    circ = summary[summary[config.ID_COLUMN].astype(str) == chosen]
+    if not circ.empty:
+        st.markdown("**Relief fulfilment for this circle:**")
+        st.dataframe(
+            circ[["resource", "required", "allocated", "unmet", "fulfilment_pct"]],
+            use_container_width=True, hide_index=True,
+        )
+
+
+@st.cache_data(ttl=3600, show_spinner="Fetching live rainfall...")
+def load_live_rain(centroids):
+    return live_rain.fetch_live_rain(centroids)
+
+
+def live_watch(predictions, centroids):
+    st.subheader("Live rainfall watch (real-time)")
+    st.caption(
+        "Observed rain (last 7 days) and forecast (next 3 days) at each circle's location, refreshed hourly. "
+        "Heavy-rain alert = 64.5 mm or more in 24 h (IMD 'heavy rain' category). "
+        "This is a watch layer alongside the model; it does not change the ML score."
+    )
+    if st.button("Refresh now"):
+        load_live_rain.clear()
+    try:
+        live = load_live_rain(centroids)
+    except Exception as e:  # offline / API down
+        st.info(f"Live rainfall is unavailable right now ({type(e).__name__}). The model results below still work.")
+        return
+    m = predictions[[config.ID_COLUMN, "impact_category", "priority_rank"]].merge(live, on=config.ID_COLUMN)
+    m["combined_flag"] = m.apply(
+        lambda r: "Watch closely" if r["heavy_rain_alert"] and r["impact_category"] != "Low"
+        else ("Heavy rain" if r["heavy_rain_alert"] else ""), axis=1)
+    st.caption(f"Last updated: {live['fetched_at'].iloc[0]}")
+    a, b = st.columns(2)
+    a.metric("Circles with heavy-rain alert", int(m["heavy_rain_alert"].sum()))
+    b.metric("Alert AND Medium/High model risk", int((m["combined_flag"] == "Watch closely").sum()))
+    st.dataframe(
+        m.sort_values(["heavy_rain_alert", "rain_next_3d_max_mm"], ascending=False)
+        .drop(columns=["fetched_at"]), use_container_width=True, hide_index=True)
+
+
+@st.cache_data(ttl=3600, show_spinner="Re-scoring with live rainfall...")
+def load_live_prediction(centroids):
+    return live_predict.run(centroids)
+
+
+def live_prediction(predictions, centroids):
+    st.subheader("Live-updated ML prediction")
+    st.caption(
+        "Re-scores the trained model using this month's rainfall so far plus the forecast. "
+        "EXPERIMENTAL: assumes the rainfall features are monthly totals in metres (unverified), "
+        "uses placeholder circle locations, and keeps other inputs at their last known values."
+    )
+    if st.button("Re-score now"):
+        load_live_prediction.clear()
+    try:
+        live = load_live_prediction(centroids)
+    except Exception as e:
+        st.info(f"Live prediction unavailable right now ({type(e).__name__}).")
+        return
+    base = predictions[[config.ID_COLUMN, "impact_category"]].rename(columns={"impact_category": "monthly_category"})
+    m = live.merge(base, on=config.ID_COLUMN)
+    m["changed"] = m["impact_category"] != m["monthly_category"]
+    st.caption(f"Last updated: {live['updated_at'].iloc[0]}")
+    a, b, c = st.columns(3)
+    a.metric("High (live)", int((m["impact_category"] == "High").sum()))
+    b.metric("Medium (live)", int((m["impact_category"] == "Medium").sum()))
+    c.metric("Circles whose category changed", int(m["changed"].sum()))
+    st.dataframe(
+        m[[config.ID_COLUMN, "impact_category", "predicted_probability", "priority_rank",
+           "projected_month_mm", "monthly_category", "predicted_affected_population"]],
+        use_container_width=True, hide_index=True)
+
+
 def main():
     st.title("Assam Flood — Explainable Impact Assessment & Relief Allocation")
     st.caption(
@@ -146,6 +253,12 @@ def main():
         "Overall demand fulfilled",
         f"{100 * fulfilled_total / required_total:.1f}%" if required_total > 0 else "N/A",
     )
+
+    circle_lookup(predictions, summary)
+
+    live_watch(predictions, centroids)
+
+    live_prediction(predictions, centroids)
 
     st.subheader("Flood impact & relief map")
     fmap = build_map(predictions, allocation, centroids, bases)
