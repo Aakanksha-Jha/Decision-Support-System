@@ -123,7 +123,11 @@ def build_map(predictions, allocation, centroids, bases) -> folium.Map:
 def circle_lookup(predictions, summary):
     """Pick a Revenue Circle -> see its predicted severity, rank, reasons and relief needs."""
     st.subheader("Check a Revenue Circle")
-    st.caption("Select or type a Revenue Circle ID to see its predicted flood severity for the coming month.")
+    st.caption(
+        "Select or type a Revenue Circle ID to see its predicted flood severity for the coming month. "
+        "(A lightweight, no-install version of this lookup is also published as a standalone web page — "
+        "see the project README for the link.)"
+    )
     ids = sorted(predictions[config.ID_COLUMN].astype(str).tolist())
     default = predictions.sort_values("priority_rank")[config.ID_COLUMN].iloc[0]
     chosen = st.selectbox("Revenue Circle ID", ids, index=ids.index(str(default)))

@@ -1,7 +1,12 @@
-# Assam Flood DSS
+# Flood DSS
 
-**An Explainable Multi-Factor Framework for Revenue Circle-Level Flood
-Impact Assessment and Relief Prioritization in Assam**
+**An Explainable Multi-Factor Decision Support System for Flood Impact
+Assessment and Relief Prioritization**
+
+Pilot region: Assam, India (Revenue Circle level). The approach is designed
+to generalize to other flood-prone regions — see
+[`docs/Roadmap_Parameters.md`](docs/Roadmap_Parameters.md) for the additional
+inputs planned for a general-purpose deployment.
 
 A two-stage Decision Support System (DSS):
 
